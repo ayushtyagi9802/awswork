@@ -1,0 +1,417 @@
+root@10:/home/ubuntu/EKS/konga_kong# cat work_pvc_kong.yml
+#apiVersion: v1
+#kind: Namespace
+#metadata:
+#  name: kong-gw
+#  annotations:
+#    kuma.io/sidecar-injection: "enabled"
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kong-gw
+  labels:
+    kuma.io/sidecar-injection: enabled
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kong-proxy
+  namespace: kong-gw
+spec:
+  type: NodePort
+  #  loadBalancerSourceRanges:
+  #  - 0.0.0.0/0
+  ports:
+  - nodePort: 31031
+    port: 8000
+    targetPort: 8000
+    protocol: TCP
+    name: kong-proxy
+  selector:
+    app: kong
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kong-admin
+  namespace: kong-gw
+spec:
+  type: NodePort
+    #  loadBalancerSourceRanges:
+    #  - 0.0.0.0/0
+  ports:
+  - nodePort: 31032
+    port: 8001
+    targetPort: 8001
+    protocol: TCP
+    name: kong-admin
+  selector:
+    app: kong
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kong-manager
+  namespace: kong-gw
+spec:
+  type: NodePort
+  #  loadBalancerSourceRanges:
+  #  - 0.0.0.0/0
+  ports:
+  - nodePort: 31033
+    port: 8002
+    targetPort: 8002
+    protocol: TCP
+    name: kong-manager
+  selector:
+    app: kong
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: kong-gw
+spec:
+  type: NodePort
+  ports:
+  - name: pgql
+    port: 5432
+    protocol: TCP
+    targetPort: 5432
+  selector:
+    app: postgres
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kong-enterprise
+  namespace: kong-gw
+spec:
+  selector:
+    matchLabels:
+      app: kong
+  replicas: 1
+  template:
+    metadata:
+      annotations:
+        kuma.io/gateway: enabled
+        kuma.io/mesh: default
+      labels:
+        name: kong-enterprise
+        app: kong
+    spec:
+      imagePullSecrets:
+        - name: kong-enterprise-edition-docker
+      containers:
+      - name: kong
+        image: kong/kong-gateway:latest
+        #        image: 867523052498.dkr.ecr.us-east-1.amazonaws.com/kong/kong-gateway:latest
+        #        image: localhost:5000/kong-gateway-ecr:latest
+        imagePullPolicy: IfNotPresent
+        env:
+          - name: KONG_ADMIN_LISTEN
+            value: '0.0.0.0:8001'
+          - name: KONG_ADMIN_API_URI
+            value: localhost:8001
+          - name: KONG_ADMIN_GUI_LISTEN
+            value: '0.0.0.0:8002'
+          - name: KONG_ENFORCE_RBAC
+            value: 'off'
+          - name: KONG_PG_PASSWORD
+            value: kong
+          - name: KONG_PG_HOST
+            value: postgres
+          - name: KONG_PG_PORT
+            value: "5432"
+          - name: KONG_PROXY_ACCESS_LOG
+            value: /dev/stdout
+          - name: KONG_ADMIN_ACCESS_LOG
+            value: /dev/stdout
+          - name: KONG_PROXY_ERROR_LOG
+            value: /dev/stderr
+          - name: KONG_ADMIN_ERROR_LOG
+            value: /dev/stderr
+          # - name: KONG_LICENSE_DATA
+            # valueFrom:
+            #   secretKeyRef:
+            #     name: kong-enterprise-license
+            #     key: license
+          - name: KONG_PORTAL
+            value: 'off'
+            #      nodeSelector:
+            #        kubernetes.io/hostname: 10.177.166.203
+            #      nodeSelector:
+            #        kubernetes.io/hostname: 10.177.166.205
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-kong-postgres
+  namespace: kong-gw
+  labels:
+    app: postgres
+spec:
+  storageClassName: efs-sc-root
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: kong-gw
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  serviceName: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - env:
+        - name: POSTGRES_USER
+          value: kong
+        - name: POSTGRES_PASSWORD
+          value: kong
+        - name: POSTGRES_DB
+          value: kong
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        image: postgres:9.5
+          #        image: 867523052498.dkr.ecr.us-east-1.amazonaws.com/kong-db-gateway:latest
+          #        image: localhost:5000/kong-db-gateway-ecr:latest
+        imagePullPolicy: IfNotPresent
+        name: postgres
+        ports:
+        - containerPort: 5432
+        volumeMounts:
+        - mountPath: /var/lib/postgresql/data
+          name: kong-postgres
+          subPath: pgdata
+      terminationGracePeriodSeconds: 60
+      #      nodeSelector:
+      #        kubernetes.io/hostname: 10.177.166.205
+      volumes:
+        - name: kong-postgres
+          persistentVolumeClaim:
+            claimName: pvc-kong-postgres
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kong-migrations
+  namespace: kong-gw
+spec:
+  template:
+    metadata:
+      name: kong-migrations
+    spec:
+      containers:
+      - command:
+        - /bin/sh
+        - -c
+        - kong migrations bootstrap
+        - kong migrations up
+        env:
+        # - name: KONG_LICENSE_DATA
+        #   valueFrom:
+        #     secretKeyRef:
+        #       key: license
+        #       name: kong-enterprise-license
+        - name: KONG_PG_PASSWORD
+          value: kong
+        - name: KONG_PG_HOST
+          value: postgres
+        - name: KONG_PG_PORT
+          value: "5432"
+        image: kong/kong-gateway:latest
+          #        image: 867523052498.dkr.ecr.us-east-1.amazonaws.com/kong/kong-gateway:latest
+          #       image: localhost:5000/kong-gateway-ecr:latest
+        imagePullPolicy: IfNotPresent
+        name: kong-migrations
+        #      nodeSelector:
+        #        kubernetes.io/hostname: 10.177.166.205
+      initContainers:
+      - command:
+        - /bin/sh
+        - -c
+        - until nc -zv $KONG_PG_HOST $KONG_PG_PORT -w1; do echo 'waiting for db'; sleep 100; done
+        env:
+        - name: KONG_PG_HOST
+          value: postgres
+        - name: KONG_PG_PORT
+          value: "5432"
+        image: busybox
+        name: wait-for-postgres
+        #      nodeSelector:
+        #        kubernetes.io/hostname: 10.177.166.203
+      restartPolicy: OnFailure
+---------------------------------------------------------------------------------------------------------
+
+
+root@10:/home/ubuntu/EKS/konga_kong# cat konga-ds.yml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-konga-ds1
+  namespace: kong-gw
+  labels:
+    type: local
+    app: konga-ds
+spec:
+  storageClassName: manual
+  capacity:
+    storage: 0.1Gi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: "/data/volume/konga-ds/konga-ds1"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-konga-ds1
+  namespace: kong-gw
+  labels:
+    app: konga-ds
+spec:
+  storageClassName: efs-sc-1000
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: konga-ds
+  namespace: kong-gw
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: konga-ds
+  template:
+    metadata:
+      labels:
+        app: konga-ds
+    spec:
+      containers:
+        - name: konga-ds
+          #          image: konga_ds_konga_ds:5
+          #          image: localhost:5000/konga_ds_konga_ds
+          #          image: pantsel/konga
+          image: 867523052498.dkr.ecr.us-east-1.amazonaws.com/konga:latest
+          #          args: ["start", "--kong-url", "kong-admin:8001"]
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 1337
+          volumeMounts:
+            - mountPath: /app/kongadata/
+              name: konga-ds1
+              #      nodeSelector:
+              #        kubernetes.io/hostname: ip-10-177-166-203
+              #        kubernetes.io/hostname: 10.177.166.205
+      volumes:
+        - name: konga-ds1
+          persistentVolumeClaim:
+            claimName: pvc-konga-ds1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: konga-ds
+  namespace: kong-gw
+  labels:
+    app: konga-ds
+spec:
+  type: NodePort
+  ports:
+    - nodePort: 31030
+      port: 1337
+      targetPort: 1337
+      name: "konga-ds-port"
+  selector:
+    app: konga-ds
+
+
+
+-----------------------------------------
+
+cat efs_storageclass_root.yml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: efs-sc-root
+provisioner: efs.csi.aws.com
+parameters:
+  provisioningMode: efs-ap
+  fileSystemId: fs-0c0457ce409f6ff3d
+  directoryPerms: "777"
+  uid: "0"
+  gid: "0"
+
+-------------------------------------------------
+
+cat efs_storageclass_1000.yml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: efs-sc-1000
+provisioner: efs.csi.aws.com
+parameters:
+  provisioningMode: efs-ap
+  fileSystemId: fs-0c0457ce409f6ff3d
+  directoryPerms: "777"
+  uid: "1000"
+  gid: "1000"
+------------------------------------
+
+
+
+cat konga-ing.yml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: konga-ingress
+  namespace: kong-gw
+  annotations:
+    alb.ingress.kubernetes.io/security-groups: sg-c64a30b0
+    alb.ingress.kubernetes.io/scheme: internal
+    alb.ingress.kubernetes.io/subnets: subnet-0277ee359c45d3ca1, subnet-0af223eb1ead4d000
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /konga
+            pathType: Exact
+            backend:
+              service:
+                name: konga-ds
+                port:
+                  number: 1337
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kong-proxy
+                port:
+                  number: 8000
+
+
+------------------------------------------
+
+run
+
+Kubectl create -f konga-ds.yml
+
+kubectl create -f work_pvc_kong.yml
