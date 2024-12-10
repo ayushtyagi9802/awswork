@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: data-pod
+spec:
+  initContainers:
+    - name: volume-mount
+      image: busybox
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -e
+          mkdir -p /mnt/data
+          if ! blkid /dev/xvda; then
+            mkfs.ext4 /dev/xvda
+          fi
+          mount /dev/xvda /mnt/data
+          echo "Block device mounted successfully"
+      securityContext:
+        privileged: true
+      volumeDevices:
+        - name: data
+          devicePath: /dev/xvda
+      volumeMounts:
+        - name: data-mount
+          mountPath: /mnt/data
+  containers:
+    - name: app
+      image: busybox
+      command: ["/bin/sh", "-c"]
+      args: ["tail -f /dev/null"]
+      volumeMounts:
+        - name: data-mount
+          mountPath: /mnt/data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: block-claim
+    - name: data-mount
+      emptyDir: {}
